@@ -1,8 +1,7 @@
 import { Router } from 'express';
-import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import Team from '../models/Team.js';
-import User from '../models/User.js';
+import Team from '../models/Team.js';     // o '../models/Teams.js' si mantuviste plural
+import User from '../models/User.js';     // idem
 
 const router = Router();
 
@@ -15,30 +14,55 @@ function signAccessToken({ userId, teamId, role }) {
   );
 }
 
-// POST /auth/login  { accessCode, displayName, phoneOrId? }
-router.post('/login', async (req, res) => {
-  const { accessCode, displayName, phoneOrId } = req.body || {};
-  if (!accessCode || !displayName) {
-    return res.status(400).json({ error: 'accessCode_and_displayName_required' });
+// Asegura que exista un Team por defecto (para no romper los FKs que ya usa el resto)
+async function getOrCreateDefaultTeam() {
+  let t = await Team.findOne({ isActive: true }).sort({ createdAt: 1 });
+  if (!t) {
+    t = await Team.create({
+      name: 'Default',
+      accessCodeHash: 'global-password-disabled', // ya no se usa
+      isActive: true
+    });
   }
-  const teams = await Team.find({ isActive: true }).limit(200);
-  // ideal: índice directo por hash (ver seed)
-  let team = null;
-  for (const t of teams) {
-    const ok = await bcrypt.compare(accessCode, t.accessCodeHash);
-    if (ok) { team = t; break; }
-  }
-  if (!team) return res.status(401).json({ error: 'invalid_access_code' });
+  return t;
+}
 
-  let user = await User.findOne({ teamId: team._id, displayName, phoneOrId });
-  if (!user) {
-    user = await User.create({ teamId: team._id, displayName, phoneOrId, role: 'OPERATOR' });
+// POST /auth/login  { email, accessCode }
+router.post('/login', async (req, res) => {
+  const email = (req.body?.email ?? '').toString().trim().toLowerCase();
+  const access = (req.body?.accessCode ?? '').toString().trim();
+  if (!email || !access) {
+    return res.status(400).json({ error: 'email_and_accessCode_required' });
   }
+
+  const global = (process.env.GLOBAL_ACCESS_CODE || '').trim();
+  if (!global) return res.status(500).json({ error: 'global_access_code_not_configured' });
+  if (access !== global) return res.status(401).json({ error: 'invalid_access_code' });
+
+  const team = await getOrCreateDefaultTeam();
+
+  let user = await User.findOne({ email });
+  if (!user) {
+    user = await User.create({
+      email,
+      teamId: team._id,
+      role: 'OPERATOR',
+      displayName: email.split('@')[0]  // opcional: nombre por defecto
+    });
+  } else if (!user.teamId) {
+    // por si tenías usuarios antiguos sin teamId
+    user.teamId = team._id;
+  }
+
   user.lastLoginAt = new Date();
   await user.save();
 
   const accessToken = signAccessToken({ userId: user._id, teamId: team._id, role: user.role });
-  res.json({ accessToken, user: { id: user._id, displayName: user.displayName, role: user.role }, team: { id: team._id, name: team.name } });
+  res.json({
+    accessToken,
+    user: { id: user._id, email: user.email, displayName: user.displayName, role: user.role },
+    team: { id: team._id, name: team.name }
+  });
 });
 
 export default router;
