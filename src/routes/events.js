@@ -50,22 +50,44 @@ router.post('/events', authRequired, async (req, res) => {
   }
 });
 
-// GET /events?plate=ABC123&from=2025-01-01&to=2025-12-31
+// GET /events?plate=ABC123&from=&to=
+// src/routes/events.js  (GET /events)
 router.get('/events', authRequired, async (req, res) => {
   const { teamId } = req.user;
   const { plate, from, to } = req.query;
+
   const query = { teamId };
+
   if (plate) {
     const n = normalizePlate(plate.toString());
-    const v = await Vehicle.findOne({ teamId, normalizedPlate: n });
-    query.vehicleId = v ? v._id : null;
+    // Buscar TODOS los vehículos que empiecen por ese prefijo
+    const vehicles = await Vehicle.find(
+      { teamId, normalizedPlate: { $regex: '^' + n } },
+      { _id: 1 }
+    );
+    if (vehicles.length === 0) return res.json([]); // nada que listar
+    query.vehicleId = { $in: vehicles.map(v => v._id) };
   }
+
   if (from || to) {
     query.at = {};
     if (from) query.at.$gte = new Date(from.toString());
     if (to) query.at.$lte = new Date(to.toString());
   }
-  const items = await Event.find(query).sort({ at: -1 }).limit(200);
+
+  const docs = await Event.find(query)
+    .sort({ at: -1 })
+    .limit(200)
+    .populate({ path: 'vehicleId', select: 'plate normalizedPlate' });
+
+  const items = docs.map(d => ({
+    _id: d._id,
+    plate: d.vehicleId?.plate ?? '—',
+    direction: d.direction,
+    at: d.at,
+    notes: d.notes ?? ''
+  }));
+
   res.json(items);
 });
 
